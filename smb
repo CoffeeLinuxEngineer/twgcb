@@ -1,0 +1,69 @@
+# Cross-subnet SMB sharing enablement for Windows 10
+# Run as Administrator
+
+# 1) Guard: must be elevated
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Write-Host "Please run PowerShell as Administrator." -ForegroundColor Red
+    exit 1
+}
+
+# 2) Enable core services for SMB sharing and Network Discovery
+$services = "LanmanServer","fdrespub","ssdpsrv","upnphost"
+foreach ($s in $services) {
+    try {
+        Set-Service -Name $s -StartupType Automatic -ErrorAction Stop
+        Start-Service -Name $s -ErrorAction Stop
+        Write-Host "Service $s is running and set to Automatic."
+    } catch {
+        Write-Warning "Failed to start/set $s: $($_.Exception.Message)"
+    }
+}
+
+# 3) Open Windows Firewall for File & Printer Sharing (SMB) and Network Discovery across ANY remote subnet
+$groups = "File and Printer Sharing","Network Discovery"
+foreach ($g in $groups) {
+    $rules = Get-NetFirewallRule -DisplayGroup $g -Direction Inbound -ErrorAction SilentlyContinue
+    if ($rules) {
+        $rules | Set-NetFirewallRule -Enabled True -Profile Any -Action Allow
+        # Set remote scope to Any (cross-subnet). Address filter is a separate object.
+        $rules | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress Any
+        Write-Host "Firewall group '$g' enabled for all profiles and RemoteAddress=Any."
+    } else {
+        Write-Warning "No inbound rules found for group '$g'."
+    }
+}
+
+# 4) Add explicit port allows for TCP 445/139 (idempotent)
+foreach ($p in 445,139) {
+    if (-not (Get-NetFirewallRule -DisplayName "Allow SMB TCP $p" -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName "Allow SMB TCP $p" -Direction Inbound -Protocol TCP -LocalPort $p -Action Allow -Profile Any | Out-Null
+        Write-Host "Added explicit allow rule for TCP $p."
+    } else {
+        Write-Host "Explicit rule for TCP $p already exists."
+    }
+}
+
+# 5) Ensure modern SMB is on (optional hardening: keep SMB1 off)
+try {
+    Set-SmbServerConfiguration -EnableSMB2Protocol $true -EnableSMB1Protocol $false -Force
+    Write-Host "SMB server config: SMB2/3 enabled, SMB1 disabled."
+} catch {
+    Write-Warning "Could not set SMB server configuration: $($_.Exception.Message)"
+}
+
+# 6) Quick optional connectivity test
+$target = Read-Host "Enter a remote IP to test TCP 445 (press Enter to skip)"
+if ($target) {
+    $res = Test-NetConnection -ComputerName $target -Port 445
+    $msg = if ($res.TcpTestSucceeded) { "SUCCESS: TCP 445 to $target is open." } else { "FAILED: TCP 445 to $target is blocked." }
+    Write-Host $msg
+}
+
+# 7) Show final firewall scopes for verification
+"File and Printer Sharing","Network Discovery" | ForEach-Object {
+    Get-NetFirewallRule -DisplayGroup $_ -Direction Inbound |
+        Get-NetFirewallAddressFilter |
+        Select-Object Name, RemoteAddress
+} | Format-Table -Auto
+
