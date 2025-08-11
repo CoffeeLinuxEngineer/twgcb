@@ -29,19 +29,26 @@ show_lines() {
         echo "(Permission denied)"
         return
     fi
-    grep -n -E '^[[:space:]]*#?[[:space:]]*CREATE_HOME[[:space:]]*=' "$TARGET" 2>/dev/null \
+    grep -n -E '^[[:space:]]*#?[[:space:]]*CREATE_HOME([[:space:]]+|[[:space:]]*=[[:space:]]+).*' "$TARGET" 2>/dev/null \
         | sed -E 's/^([0-9]+):/Line: \1:/' \
         || echo "(No CREATE_HOME line found)"
 }
 
 check_compliance() {
-    # Compliant if a non-comment line sets CREATE_HOME to 'yes' (case-insensitive).
+    # Compliant if a non-comment line sets CREATE_HOME to 'yes' (allow '=' or whitespace).
     # Missing file or unreadable file -> non-compliant.
     [ -r "$TARGET" ] || return 1
     awk 'BEGIN{IGNORECASE=1}
-         /^[ \t]*#/ {next}
-         /^[ \t]*CREATE_HOME[ \t]*=[ \t]*yes([ \t]|$)/ {found=1}
-         END{exit found?0:1}' "$TARGET"
+         {
+           line=$0
+           sub(/#.*/,"",line)                # strip trailing comments
+           if (match(line,/^[ \t]*CREATE_HOME[ \t]*(=?)[ \t]*([[:alnum:]_+-]+)/,m)) {
+               val=m[2]
+               if (tolower(val)=="yes") { ok=1 }
+               found=1
+           }
+         }
+         END{ exit (found && ok)?0:1 }' "$TARGET"
 }
 
 apply_fix() {
@@ -64,14 +71,28 @@ apply_fix() {
         return 1
     fi
 
-    # If a (possibly commented) CREATE_HOME line exists, replace it. Otherwise append.
-    if grep -qEi '^[[:space:]]*#?[[:space:]]*CREATE_HOME[[:space:]]*=' "$TARGET"; then
-        if ! sed -ri 's/^[[:space:]]*#?[[:space:]]*CREATE_HOME[[:space:]]*=.*/CREATE_HOME yes/' "$TARGET"; then
-            echo -e "${RED}Failed to apply${RESET}"
-            echo "Reason: unable to update CREATE_HOME in $TARGET."
-            return 1
-        fi
+    # 1) Try to update an existing non-comment CREATE_HOME line (with '=' or whitespace)
+    if sed -ri -E 's/^[[:space:]]*CREATE_HOME([[:space:]]*=[[:space:]]*|[[:space:]]+).*$/CREATE_HOME yes/' "$TARGET"; then
+        :
     else
+        echo -e "${RED}Failed to apply${RESET}"
+        echo "Reason: sed failed updating non-comment CREATE_HOME."
+        return 1
+    fi
+
+    # 2) If still not compliant, try to convert a commented line to active
+    if ! check_compliance; then
+        if grep -qEi '^[[:space:]]*#[[:space:]]*CREATE_HOME([[:space:]]*=[[:space:]]*|[[:space:]]+).*' "$TARGET"; then
+            if ! sed -ri -E 's/^[[:space:]]*#[[:space:]]*CREATE_HOME([[:space:]]*=[[:space:]]*|[[:space:]]+).*$/CREATE_HOME yes/' "$TARGET"; then
+                echo -e "${RED}Failed to apply${RESET}"
+                echo "Reason: unable to uncomment CREATE_HOME in $TARGET."
+                return 1
+            fi
+        fi
+    fi
+
+    # 3) If still not compliant, append a new line
+    if ! check_compliance; then
         if ! printf '\nCREATE_HOME yes\n' >> "$TARGET"; then
             echo -e "${RED}Failed to apply${RESET}"
             echo "Reason: unable to append CREATE_HOME to $TARGET."
@@ -136,3 +157,4 @@ while true; do
             ;;
     esac
 done
+
