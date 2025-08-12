@@ -1,0 +1,66 @@
+# Ensure we're elevated
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Write-Host "Please run PowerShell as Administrator." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "=== Enabling core SMB & discovery services ==="
+$services = "LanmanServer","FDResPub","fdPHost","SSDPSRV","UPnPHost"
+foreach ($svcName in $services) {
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        Write-Warning "Service '$svcName' not found on this system."
+        continue
+    }
+    try {
+        Set-Service -Name $svcName -StartupType Automatic -ErrorAction Stop
+        if ($svc.Status -ne 'Running') { Start-Service -Name $svcName -ErrorAction Stop }
+        Write-Host "Service $svcName is running and set to Automatic."
+    } catch {
+        Write-Warning ("Failed to start/set {0}: {1}" -f $svcName, $_.Exception.Message)
+    }
+}
+
+Write-Host "=== Opening firewall for SMB and Network Discovery ==="
+$groups = "File and Printer Sharing","Network Discovery"
+foreach ($group in $groups) {
+    $rules = Get-NetFirewallRule -DisplayGroup $group -Direction Inbound -ErrorAction SilentlyContinue
+    if ($rules) {
+        $rules | Set-NetFirewallRule -Enabled True -Profile Any -Action Allow
+        $rules | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress Any
+        Write-Host "Firewall group '$group' enabled for all profiles and RemoteAddress=Any."
+    } else {
+        Write-Warning "No inbound rules found for group '$group'."
+    }
+}
+
+Write-Host "=== Adding explicit TCP 445 allow rule ==="
+if (-not (Get-NetFirewallRule -DisplayName "Allow SMB TCP 445" -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName "Allow SMB TCP 445" -Direction Inbound -Protocol TCP -LocalPort 445 -Action Allow -Profile Any | Out-Null
+    Write-Host "Added explicit allow rule for TCP 445."
+} else {
+    Write-Host "Explicit rule for TCP 445 already exists."
+}
+
+Write-Host "=== Setting SMB2/3 on, SMB1 off ==="
+try {
+    Set-SmbServerConfiguration -EnableSMB2Protocol $true -EnableSMB1Protocol $false -Force
+    Write-Host "SMB server config: SMB2/3 enabled, SMB1 disabled."
+} catch {
+    Write-Warning "Could not set SMB server configuration: $($_.Exception.Message)"
+}
+
+Write-Host "=== Setting network profile to Private if currently Public ==="
+Get-NetConnectionProfile | ForEach-Object {
+    if ($_.NetworkCategory -eq 'Public') {
+        try {
+            Set-NetConnectionProfile -InterfaceIndex $_.InterfaceIndex -NetworkCategory Private
+            Write-Host "Set network '$($_.Name)' to Private."
+        } catch {
+            Write-Warning ("Failed to set network '{0}' to Private: {1}" -f $_.Name, $_.Exception.Message)
+        }
+    }
+}
+
+Write-Host "=== Done. This system should now accept SMB connections from any subnet. ===" -ForegroundColor Green
