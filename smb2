@@ -1,6 +1,0 @@
-"File and Printer Sharing","Network Discovery" |
-  ForEach-Object {
-    Get-NetFirewallRule -DisplayGroup $_ -Direction Inbound |
-      Get-NetFirewallAddressFilter |
-      Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet
-  }
