@@ -9,7 +9,6 @@ C_OFF="\033[0m"
 
 AUDIT_DIR="/etc/audit/rules.d"
 AUDIT_FILE="$AUDIT_DIR/audit.rules"
-
 RULE='-w /var/log/faillock -p wa -k logins'
 
 echo -e "TWGCB-01-008-0171: Ensure Pam_Faillock log file is recorded by auditd\n"
@@ -31,6 +30,18 @@ show_status() {
         echo "(File not found: $AUDIT_FILE)"
     fi
     echo
+}
+
+is_immutable() {
+    local s
+    s=$(auditctl -s 2>/dev/null | grep -Eo 'enabled[[:space:]]+[0-9]+' | awk '{print $2}')
+    [[ "$s" == "2" ]]
+}
+
+ensure_auditd_running() {
+    systemctl is-active --quiet auditd && return 0
+    systemctl start auditd 2>/dev/null
+    systemctl is-active --quiet auditd
 }
 
 # ---------- Check phase ----------
@@ -58,21 +69,28 @@ done
 # ---------- Apply ----------
 apply_failed=0
 
-if [[ ! -d "$AUDIT_DIR" ]]; then
-    mkdir -p "$AUDIT_DIR" || apply_failed=1
-fi
+[[ -d "$AUDIT_DIR" ]] || mkdir -p "$AUDIT_DIR" || apply_failed=1
+[[ -e "$AUDIT_FILE" ]] || touch "$AUDIT_FILE" || apply_failed=1
 
-if [[ ! -e "$AUDIT_FILE" ]]; then
-    touch "$AUDIT_FILE" || apply_failed=1
+if [[ $apply_failed -eq 0 ]]; then
+    grep -qF -- "$RULE" "$AUDIT_FILE" || echo "$RULE" >> "$AUDIT_FILE"
 fi
 
 if [[ $apply_failed -eq 0 ]]; then
-    if ! grep -qF -- "$RULE" "$AUDIT_FILE"; then
-        echo "$RULE" >> "$AUDIT_FILE"
-    fi
     if ! augenrules --load; then
-        echo -e "${C_RED}Failed to reload audit rules (augenrules --load).${C_OFF}"
-        apply_failed=1
+        if is_immutable; then
+            echo
+            show_status
+            echo -e "${C_GREEN}Applied to disk (pending reboot).${C_OFF}"
+            echo "Note: auditd is in immutable mode (-e 2). Reboot is required for new rules to take effect."
+            exit 0
+        fi
+        if ensure_auditd_running && augenrules --load; then
+            :
+        else
+            apply_failed=1
+            echo -e "${C_RED}Failed to reload audit rules (augenrules --load).${C_OFF}"
+        fi
     fi
 fi
 
@@ -81,7 +99,6 @@ echo
 show_status
 if [[ $apply_failed -eq 0 ]] && check_compliance; then
     echo -e "${C_GREEN}Successfully applied.${C_OFF}"
-    echo "Note: If auditd is in immutable mode (-e 2), a reboot is required for new rules to take effect."
     exit 0
 else
     echo -e "${C_RED}Failed to apply.${C_OFF}"
