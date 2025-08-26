@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Heterogeneous Table (JS)</title>
+  <style>
+    :root { --radius: 10px; }
+    body { font-family: system-ui, Arial, sans-serif; padding: 24px; }
+    .tbl {
+      border-collapse: collapse;
+      border: 1px solid #aaa;
+      width: 100%;
+      max-width: 820px;
+      overflow: hidden;
+      border-radius: var(--radius);
+    }
+    .tbl th, .tbl td {
+      border: 1px solid #ddd;
+      padding: 10px 12px;
+      vertical-align: middle;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .tbl thead th {
+      background: #f5f7fb;
+      font-weight: 600;
+    }
+    .tbl .center { text-align: center; }
+    .tbl .right  { text-align: right; }
+    .zebra tbody tr:nth-child(odd) td { background: #fafafa; }
+    .dense th, .dense td { padding: 6px 8px; }
+    .note {
+      margin-top: 12px; color: #444; font-size: 0.95rem;
+    }
+    button { padding: 6px 10px; border-radius: 8px; border: 1px solid #bbb; background: #fff; cursor: pointer; }
+    input[type="text"] { padding: 6px 8px; border: 1px solid #bbb; border-radius: 8px; }
+  </style>
+</head>
+<body>
+
+<h2>Heterogeneous Table (rowspan/colspan, uneven rows)</h2>
+<div id="table-root"></div>
+
+<script>
+  /**
+   * Cell spec:
+   * {
+   *   text?: string,          // plain text content
+   *   html?: string,          // raw HTML (ignored if text is provided)
+   *   header?: boolean,       // renders <th> instead of <td>
+   *   colspan?: number,       // default 1
+   *   rowspan?: number,       // default 1
+   *   align?: "left"|"center"|"right",
+   *   className?: string,
+   *   attrs?: Record<string,string> // extra attributes
+   * }
+   *
+   * Table spec: Cell[][]  (array of rows, each row is an array of cell specs)
+   * Notes:
+   * - Rows can have different lengths.
+   * - You don't need to insert placeholders for columns occupied by rowspans above;
+   *   HTML table layout handles it automatically.
+   */
+  function createHeterogeneousTable(rowsSpec, options = {}) {
+    const {
+      className = "tbl zebra",   // "tbl", "zebra", "dense"
+      useThead = true,           // treat first row as <thead>
+      tableAttrs = {},           // extra attributes for <table>
+    } = options;
+
+    const table = document.createElement("table");
+    table.className = className;
+    for (const [k, v] of Object.entries(tableAttrs)) table.setAttribute(k, v);
+
+    const thead = useThead ? document.createElement("thead") : null;
+    const tbody = document.createElement("tbody");
+
+    rowsSpec.forEach((row, rIdx) => {
+      const tr = document.createElement("tr");
+
+      row.forEach(cellSpec => {
+        const isHeader = cellSpec.header || (useThead && rIdx === 0);
+        const cell = document.createElement(isHeader ? "th" : "td");
+
+        const cs = Math.max(1, Number(cellSpec.colspan || 1));
+        const rs = Math.max(1, Number(cellSpec.rowspan || 1));
+        if (cs > 1) cell.colSpan = cs;
+        if (rs > 1) cell.rowSpan = rs;
+
+        if (cellSpec.text != null) {
+          cell.textContent = cellSpec.text;
+        } else if (cellSpec.html != null) {
+          cell.innerHTML = cellSpec.html;
+        } else {
+          cell.innerHTML = "&nbsp;";
+        }
+
+        if (cellSpec.align) cell.classList.add(cellSpec.align);
+        if (cellSpec.className) cell.classList.add(cellSpec.className);
+        if (cellSpec.attrs) {
+          for (const [k, v] of Object.entries(cellSpec.attrs)) {
+            cell.setAttribute(k, v);
+          }
+        }
+
+        tr.appendChild(cell);
+      });
+
+      if (useThead && rIdx === 0) thead.appendChild(tr);
+      else tbody.appendChild(tr);
+    });
+
+    if (useThead) table.appendChild(thead);
+    table.appendChild(tbody);
+    return table;
+  }
+
+  // Demo data with mixed row lengths and spans
+  const spec = [
+    // Header band (two groups across 4 columns)
+    [
+      { text: "Group 1", header: true, colspan: 2, align: "center" },
+      { text: "Group 2", header: true, colspan: 2, align: "center" }
+    ],
+    // Column headers
+    [
+      { text: "A", header: true },
+      { text: "B", header: true },
+      { text: "C", header: true },
+      { text: "D", header: true }
+    ],
+    // Row 1: A spans two rows; C spans two columns
+    [
+      { text: "A1", rowspan: 2, className: "center" },
+      { text: "B1" },
+      { text: "C1-2", colspan: 2, className: "center" }
+    ],
+    // Row 2: (no cell for col 1 because A1 rowspans here)
+    [
+      { text: "B2" },
+      { text: "C2" },
+      { text: "D2" }
+    ],
+    // Row 3: A3 spans three columns
+    [
+      { text: "A3 merged", colspan: 3 },
+      { text: "D3" }
+    ],
+    // Row 4: heterogeneous content (HTML inside cells)
+    [
+      { html: '<input type="text" placeholder="Type…">', colspan: 2 },
+      { html: '<button type="button" onclick="alert(\'Clicked\')">Action</button>' },
+      { text: "Notes →", align: "right" }
+    ],
+    // Row 5: very uneven (single cell across all four columns)
+    [
+      { text: "Footer (single cell across all columns)", colspan: 4, align: "center" }
+    ]
+  ];
+
+  const root = document.getElementById("table-root");
+  const table = createHeterogeneousTable(spec, {
+    className: "tbl zebra", // try: "tbl zebra dense"
+    useThead: true
+  });
+  root.appendChild(table);
+</script>
+
+<p class="note">
+  Try changing <code>rowspan</code>/<code>colspan</code> in the <code>spec</code> array, add/remove cells per row, and mix <code>text</code> with <code>html</code>.
+  The renderer will build a valid table without needing placeholder cells.
+</p>
+
+</body>
+</html>
+
