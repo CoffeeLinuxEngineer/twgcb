@@ -1,49 +1,34 @@
-#
-//  TWGCB-01-008-0160.sh
-//  
-//
-//  Created by zhuo on 2025/9/1.
-//
-
-
 #!/bin/bash
 # TWGCB-01-008-0160: Audit kernel module load/unload events
 # Target OS: RHEL 8.5
-# Required rules (from baseline):
+# Required rules (baseline):
 #   -w /sbin/insmod   -p x -k modules
 #   -w /sbin/rmmod    -p x -k modules
 #   -w /sbin/modprobe -p x -k modules
 #   -a always,exit -F arch=b64 -S init_module -S delete_module -k modules
 #   -a always,exit -F arch=b32 -S init_module -S delete_module -k modules
-# Behavior:
-#   - Check the above in /etc/audit/rules.d/audit.rules
-#   - Print matching lines with "Line: <n>:" prefixes
-#   - Offer to append any missing rules and reload with augenrules
-#   - Color-coded outputs; interactive [Y/N/C]
-# Notes:
-#   - If 'auditctl -s' shows enabled=2 (locked), a reboot is required to load new rules.
-#   - No Chinese in code per project requirements.
 
 set -u -o pipefail
 
 # Colors (bright)
-GREEN="\e[92m"
-RED="\e[91m"
-YELLOW="\e[93m"
-CYAN="\e[96m"
-RESET="\e[0m"
+GREEN="\e[92m"; RED="\e[91m"; YELLOW="\e[93m"; CYAN="\e[96m"; RESET="\e[0m"
 
 ITEM_ID="TWGCB-01-008-0160"
 TITLE="Record kernel module load/unload events (audit rules)"
 RULES_DIR="/etc/audit/rules.d"
 RULES_FILE="${RULES_DIR}/audit.rules"
 
+# Must be root
+if [[ $EUID -ne 0 ]]; then
+  echo -e "${RED}This script must run as root (try: sudo $0).${RESET}"
+  exit 1
+fi
+
 echo -e "${CYAN}${ITEM_ID}: ${TITLE}${RESET}"
 echo
 echo "Checking audit rules in ${RULES_FILE}..."
 echo "Check results:"
 
-# Patterns (exact lines recommended by baseline)
 REQ_LINES=(
   "-w /sbin/insmod -p x -k modules"
   "-w /sbin/rmmod -p x -k modules"
@@ -52,7 +37,6 @@ REQ_LINES=(
   "-a always,exit -F arch=b32 -S init_module -S delete_module -k modules"
 )
 
-# Tolerant regexes to detect presence (allow extra spaces/options order not strictly enforced)
 REQ_REGEX=(
   '^[[:space:]]*-w[[:space:]]+/sbin/insmod\b.*-p[[:space:]]*x\b.*-k[[:space:]]*modules([[:space:]]|$)'
   '^[[:space:]]*-w[[:space:]]+/sbin/rmmod\b.*-p[[:space:]]*x\b.*-k[[:space:]]*modules([[:space:]]|$)'
@@ -80,23 +64,18 @@ show_matches_with_lines() {
   fi
 }
 
-# Display findings for each required rule
 for ((i=0; i<${#REQ_REGEX[@]}; i++)); do
   echo "Required: ${REQ_LINES[$i]}"
   show_matches_with_lines "$RULES_FILE" "${REQ_REGEX[$i]}"
 done
 echo
 
-# Determine compliance
 missing_idx=()
 if [[ -f "$RULES_FILE" ]]; then
   for ((i=0; i<${#REQ_REGEX[@]}; i++)); do
-    if ! grep -Eq "${REQ_REGEX[$i]}" "$RULES_FILE"; then
-      missing_idx+=("$i")
-    fi
+    grep -Eq "${REQ_REGEX[$i]}" "$RULES_FILE" || missing_idx+=("$i")
   done
 else
-  # If file not present, treat all as missing
   for ((i=0; i<${#REQ_REGEX[@]}; i++)); do missing_idx+=("$i"); done
 fi
 
@@ -159,7 +138,6 @@ if augenrules --load >/dev/null 2>&1; then
     echo "Required: ${REQ_LINES[$i]}"
     show_matches_with_lines "$RULES_FILE" "${REQ_REGEX[$i]}"
   done
-  # Verify all present now
   all_ok=1
   for ((i=0; i<${#REQ_REGEX[@]}; i++)); do
     grep -Eq "${REQ_REGEX[$i]}" "$RULES_FILE" || all_ok=0
@@ -181,3 +159,4 @@ else
   echo -e "${RED}Failed to apply:${RESET} Could not load rules via augenrules."
   exit 1
 fi
+
