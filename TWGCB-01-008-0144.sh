@@ -1,8 +1,8 @@
+# create the script right here
+cat > TWGCB-01-008-0144-v3.sh <<'SH'
 #!/bin/bash
-# TWGCB-01-008-0144 v2: Audit tools ownership must be root:root
-# Adds:
-#   --ignore-missing  : treat missing tools as N/A (do not fail compliance)
-#   --apply           : non-interactive; auto-fix ownership of existing files
+# TWGCB-01-008-0144 v3: Audit tools ownership must be root:root (interactive)
+# New: directly asks whether to SKIP missing tools (during fixes) and IGNORE missing tools (for compliance).
 # Target OS: RHEL 8.5
 # Notes:
 #   - No Chinese in code.
@@ -15,21 +15,6 @@ GREEN="\e[92m"; RED="\e[91m"; YELLOW="\e[93m"; CYAN="\e[96m"; RESET="\e[0m"
 ITEM_ID="TWGCB-01-008-0144"
 TITLE="Audit tools ownership (must be root:root)"
 
-USAGE="Usage: $0 [--ignore-missing] [--apply]
-  --ignore-missing  Treat missing tools as N/A for compliance
-  --apply           Auto-apply chown fixes without prompting"
-
-IGNORE_MISSING=0
-AUTO_APPLY=0
-for arg in "$@"; do
-  case "$arg" in
-    --ignore-missing) IGNORE_MISSING=1 ;;
-    --apply)          AUTO_APPLY=1 ;;
-    -h|--help) echo "$USAGE"; exit 0 ;;
-    *) echo "Unknown option: $arg"; echo "$USAGE"; exit 2 ;;
-  esac
-done
-
 # Must be root
 if [[ $EUID -ne 0 ]]; then
   echo -e "${RED}This script must run as root (try: sudo $0).${RESET}"
@@ -37,6 +22,31 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo -e "${CYAN}${ITEM_ID}: ${TITLE}${RESET}"
+echo
+
+# --- Prompt: skip & ignore -------------------------------------------------
+read_yn() {
+  # $1=prompt, $2=default(Y/N)
+  local prompt="$1" def="${2:-Y}" ans
+  local hint="[Y]es / [N]o"
+  echo -n "${prompt} ${hint}: "
+  IFS= read -r ans
+  if [[ -z "${ans:-}" ]]; then ans="$def"; fi
+  case "$ans" in
+    [Yy]|[Yy]es) return 0 ;;
+    [Nn]|[Nn]o)  return 1 ;;
+    *) echo "Please answer Y or N."; read_yn "$prompt" "$def"; return $? ;;
+  esac
+}
+
+SKIP_MISSING=0
+IGNORE_MISSING=0
+if read_yn "Skip missing tools during fixes (they'll be reported but not block the operation)?" "Y"; then
+  SKIP_MISSING=1
+fi
+if read_yn "Ignore missing tools for compliance (treat as N/A)?" "Y"; then
+  IGNORE_MISSING=1
+fi
 echo
 
 TOOLS=(
@@ -101,58 +111,57 @@ for name in "${TOOLS[@]}"; do
 done
 
 echo
+compliant_now=0
 if [[ ${#BAD_PATHS[@]} -eq 0 ]]; then
   if [[ ${#MISSING[@]} -eq 0 || $IGNORE_MISSING -eq 1 ]]; then
-    echo -e "${GREEN}Compliant:${RESET} All applicable audit tools are owned by root:root."
-    if [[ ${#MISSING[@]} -gt 0 ]]; then
-      echo -e "${YELLOW}Note:${RESET} ${#MISSING[@]} tool(s) missing but ignored due to --ignore-missing."
-    fi
-    exit 0
+    compliant_now=1
   fi
 fi
 
-# Build non-compliance message
+if [[ $compliant_now -eq 1 ]]; then
+  echo -e "${GREEN}Compliant:${RESET} All applicable audit tools are owned by root:root."
+  if [[ ${#MISSING[@]} -gt 0 ]]; then
+    echo -e "${YELLOW}Note:${RESET} ${#MISSING[@]} tool(s) missing but ignored per your choice."
+  fi
+  exit 0
+fi
+
+# Report issues
 if [[ ${#BAD_PATHS[@]} -gt 0 ]]; then
   echo -e "${RED}Non-compliant:${RESET} ${#BAD_PATHS[@]} item(s) with wrong ownership:"
   for desc in "${BAD_DESC[@]}"; do echo "  - ${desc}"; done
 fi
-if [[ ${#MISSING[@]} -gt 0 && $IGNORE_MISSING -eq 0 ]]; then
-  echo -e "${RED}Non-compliant:${RESET} ${#MISSING[@]} missing tool(s):"
-  for m in "${MISSING[@]}"; do echo "  - ${m} missing"; done
-fi
-if [[ ${#MISSING[@]} -gt 0 && $IGNORE_MISSING -eq 1 ]]; then
-  echo -e "${YELLOW}Info:${RESET} ${#MISSING[@]} missing tool(s) ignored (--ignore-missing):"
-  for m in "${MISSING[@]}"; do echo "  - ${m} missing (ignored)"; done
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  if [[ $IGNORE_MISSING -eq 1 ]]; then
+    echo -e "${YELLOW}Info:${RESET} ${#MISSING[@]} missing tool(s) treated as N/A:"
+    for m in "${MISSING[@]}"; do echo "  - ${m} (ignored)"; done
+  else
+    echo -e "${RED}Non-compliant:${RESET} ${#MISSING[@]} missing tool(s):"
+    for m in "${MISSING[@]}"; do echo "  - ${m} missing"; done
+  fi
 fi
 
-# If nothing to fix (only missing and we're strict), offer suggestion and exit
-if [[ ${#BAD_PATHS[@]} -eq 0 ]]; then
-  if [[ $IGNORE_MISSING -eq 1 ]]; then
-    # Already reported compliant earlier; safety fallback
-    exit 0
+# If nothing to fix (only missing and NOT ignoring), stop here
+if [[ ${#BAD_PATHS[@]} -eq 0 && $IGNORE_MISSING -eq 0 && ${#MISSING[@]} -gt 0 ]]; then
+  if [[ $SKIP_MISSING -eq 1 ]]; then
+    echo
+    echo "Nothing to fix automatically (only missing tools). Skipping per your choice."
+    exit 1
   else
     echo
-    echo "Nothing to fix automatically (only missing tools found)."
-    echo "Tip: install required packages or re-run with --ignore-missing if acceptable."
+    echo "Missing tools remain and were not skipped. Install required packages or rerun with ignore."
     exit 1
   fi
 fi
 
-# Apply fixes
-if [[ $AUTO_APPLY -eq 1 ]]; then
-  ans="Y"
+# Prompt to apply ownership fixes for existing files
+echo
+if read_yn "Apply fix now (chown root:root on existing non-compliant files)?" "Y"; then
+  :
 else
-  echo
-  echo -n "Apply fix now (chown root:root on existing files; skip missing)? [Y]es / [N]o / [C]ancel: "
-  read -rsn1 ans; echo
+  echo "Skipped."
+  exit 0
 fi
-
-case "${ans:-}" in
-  [Yy]) ;;
-  [Nn]) echo "Skipped."; exit 0 ;;
-  [Cc]) echo "Canceled."; exit 2 ;;
-  *)    echo "Invalid choice. Aborted."; exit 2 ;;
-esac
 
 fix_fail=0
 for path in "${BAD_PATHS[@]}"; do
@@ -164,7 +173,12 @@ for path in "${BAD_PATHS[@]}"; do
       fix_fail=1
     fi
   else
-    echo "Skip (missing): ${path}"
+    if [[ $SKIP_MISSING -eq 1 ]]; then
+      echo "Skip (missing): ${path}"
+    else
+      echo -e "${RED}Missing (not skipped):${RESET} ${path}"
+      fix_fail=1
+    fi
   fi
 done
 
@@ -194,8 +208,10 @@ echo
 if [[ $any_bad -eq 0 && $fix_fail -eq 0 ]]; then
   if [[ ${#MISSING[@]} -gt 0 && $IGNORE_MISSING -eq 1 ]]; then
     echo -e "${GREEN}Successfully applied (missing tools ignored).${RESET}"
-  else
+  elif [[ ${#MISSING[@]} -eq 0 ]]; then
     echo -e "${GREEN}Successfully applied.${RESET}"
+  else
+    echo -e "${YELLOW}Applied with notes:${RESET} Some tools are missing."
   fi
   exit 0
 else
