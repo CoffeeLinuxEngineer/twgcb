@@ -1,5 +1,8 @@
 #!/bin/bash
-# TWGCB-01-008-0145: Protect audit tools integrity with AIDE
+# TWGCB-01-008-0145 v2: Protect audit tools integrity (AIDE rules)
+# Fixes:
+#   - Avoids sed/regex escaping entirely when matching paths (uses awk, robust for '/usr/...').
+#   - Treats empty <Enter> at the prompt as "Y" for convenience.
 # Target OS: RHEL 8.5
 # Baseline (add these rules to /etc/aide.conf):
 #   /usr/sbin/auditctl       p+i+n+u+g+s+b+acl+xattrs+sha512
@@ -10,10 +13,6 @@
 #   /usr/sbin/audisp-remote  p+i+n+u+g+s+b+acl+xattrs+sha512
 #   /usr/sbin/audisp-syslog  p+i+n+u+g+s+b+acl+xattrs+sha512
 #   /usr/sbin/augenrules     p+i+n+u+g+s+b+acl+xattrs+sha512
-# Behavior:
-#   - Checks /etc/aide.conf for each rule.
-#   - Prints matching lines with 'Line: ' prefixed line numbers.
-#   - Interactively appends any missing rules (under a comment header) and reminds to re-init AIDE DB.
 # Notes:
 #   - No Chinese in code.
 
@@ -37,8 +36,8 @@ declare -a TOOLS=(
   "/usr/sbin/augenrules"
 )
 ATTR_CANON="p+i+n+u+g+s+b+acl+xattrs+sha512"
-# Tokens we must see on the same line (order-insensitive; extra tokens allowed)
-read -r -a TOKENS <<< "p i n u g s b acl xattrs sha512"
+# Tokens to verify (order-insensitive; extra tokens allowed)
+TOKENS=(p i n u g s b acl xattrs sha512)
 
 # Must be root to modify config
 if [[ $EUID -ne 0 ]]; then
@@ -52,15 +51,34 @@ echo "Checking ${AIDE_CONF}..."
 echo "Check results:"
 
 show_matches_with_lines() {
+  # Prints lines beginning with the given path (ignoring leading whitespace), with line numbers
   local file="$1" path="$2"
   if [[ -r "$file" ]]; then
-    # Show any lines beginning with the path (ignore leading whitespace)
-    local out
-    out="$(grep -nE "^[[:space:]]*$(printf '%s' "$path" | sed -E 's/[.[\]{}()*+?^$|\\/]/\\&/g')[[:space:]]" "$file" 2>/dev/null | sed -E 's/^/Line: /')"
-    if [[ -n "$out" ]]; then
-      echo "$out"
-    else
+    awk -v p="$path" '
+      {
+        line=$0
+        sub(/^[[:space:]]*/,"", line)      # trim leading spaces
+        # strip trailing comment for display test but keep original line output
+        disp=$0
+        if (substr(line,1,length(p))==p) {
+          printf "Line: %d:%s\n", NR, disp
+        }
+      }
+    ' "$file"
+    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+      # If awk errored, say so; otherwise if no output, show "No matching line..."
       echo "(No matching line found)"
+    else
+      # Check if any lines printed; if not, note it
+      if ! awk -v p="$path" '
+          {
+            line=$0; sub(/^[[:space:]]*/,"", line)
+            if (substr(line,1,length(p))==p) { found=1 }
+          }
+          END { exit(found?0:1) }
+        ' "$file"; then
+        echo "(No matching line found)"
+      fi
     fi
   else
     if [[ -e "$file" ]]; then
@@ -71,30 +89,36 @@ show_matches_with_lines() {
   fi
 }
 
-# return 0 if a compliant line exists for the given path
+# Return 0 if a compliant line exists for the given path
 rule_exists() {
   local file="$1" path="$2"
   [[ -r "$file" ]] || return 1
-  # Iterate candidate lines that start with the path
-  while IFS= read -r cand; do
-    # Strip line number if provided
-    local line="${cand#*:}"
-    # Remove comments after '#'
-    line="${line%%#*}"
-    # Ensure path is present at line start (ignoring leading spaces)
-    if ! printf '%s\n' "$line" | grep -qE "^[[:space:]]*$(printf '%s' "$path" | sed -E 's/[.[\]{}()*+?^$|\\/]/\\&/g')([[:space:]]|$)"; then
-      continue
-    fi
-    # Now require each token to exist as a '+'-separated token (order-insensitive). Allow extra tokens.
-    local ok=1
-    for t in "${TOKENS[@]}"; do
-      printf '%s\n' "$line" | grep -qE "(^|[[:space:]+])${t}([[:space:]+]|$)" || { ok=0; break; }
-    done
-    if [[ $ok -eq 1 ]]; then
-      return 0
-    fi
-  done < <(grep -nE "^[[:space:]]*$(printf '%s' "$path" | sed -E 's/[.[\]{}()*+?^$|\\/]/\\&/g')[[:space:]]" "$file" 2>/dev/null || true)
-  return 1
+  awk -v p="$path" '
+    function has_token(rest, t,  re) {
+      # token boundary: start or +/space before and +/space/end after
+      re = "(^|[+[:space:]])" t "([+[:space:]]|$)"
+      return (rest ~ re)
+    }
+    /^[[:space:]]*#/ {next}
+    {
+      line=$0
+      # Remove trailing comment
+      sub(/[[:space:]]*#.*/,"", line)
+      # Trim leading whitespace
+      sub(/^[[:space:]]*/,"", line)
+      if (substr(line,1,length(p))==p) {
+        rest=substr(line,length(p)+1)
+        # Verify all required tokens exist
+        ok=1
+        split("p i n u g s b acl xattrs sha512", req, " ")
+        for (i in req) {
+          if (!has_token(rest, req[i])) { ok=0; break }
+        }
+        if (ok) { print "OK"; exit 0 }
+      }
+    }
+    END { if (!ok) exit 1 }
+  ' "$file" >/dev/null
 }
 
 missing=()
@@ -107,7 +131,9 @@ echo
 
 if [[ -f "$AIDE_CONF" ]]; then
   for p in "${TOOLS[@]}"; do
-    rule_exists "$AIDE_CONF" "$p" || missing+=("$p")
+    if ! rule_exists "$AIDE_CONF" "$p"; then
+      missing+=("$p")
+    fi
   done
 else
   # If file doesn't exist, treat all as missing
@@ -126,7 +152,9 @@ done
 
 echo
 echo -n "Apply fix now (append missing rules to ${AIDE_CONF})? [Y]es / [N]o / [C]ancel: "
-read -rsn1 ans; echo
+# Treat empty input as Yes
+IFS= read -rsn1 ans; echo
+[[ -z "${ans:-}" ]] && ans="Y"
 case "$ans" in
   [Yy]) ;;
   [Nn]) echo "Skipped."; exit 0 ;;
@@ -137,10 +165,10 @@ esac
 # Apply: ensure file exists and is writable
 if [[ ! -e "$AIDE_CONF" ]]; then
   # Attempt to create
-  touch "$AIDE_CONF" 2>/dev/null || {
+  if ! touch "$AIDE_CONF" 2>/dev/null; then
     echo -e "${RED}Failed to apply:${RESET} Unable to create ${AIDE_CONF} (permission denied?)."
     exit 1
-  }
+  fi
 fi
 
 # Backup
