@@ -1,12 +1,7 @@
 #!/bin/bash
-# TWGCB-01-008-0156: Audit identity files changes (RHEL 8.5)
-# Monitors changes to /etc/{group,passwd,gshadow,shadow} and /etc/security/opasswd
-# Required rules (baseline):
-#   -w /etc/group -p wa -k identity
-#   -w /etc/passwd -p wa -k identity
-#   -w /etc/gshadow -p wa -k identity
-#   -w /etc/shadow -p wa -k identity
-#   -w /etc/security/opasswd -p wa -k identity
+# TWGCB-01-008-0156 v2: Audit identity files changes (RHEL 8.5)
+# Fix: corrected regex for /etc/shadow watch rule in compliance check.
+# Monitors /etc/{group,passwd,gshadow,shadow} and /etc/security/opasswd.
 # Behavior:
 #   - Checks /etc/audit/rules.d/identity.rules for all five watch rules
 #   - Prints matching lines with 'Line: ' prefixed numbers
@@ -44,7 +39,7 @@ REQ_REGEX=(
   '^[[:space:]]*-w[[:space:]]+/etc/group([[:space:]]+.*)?-p[[:space:]]*[rwxad]*w[rwxad]*a[rwxad]*([[:space:]]+.*)?-k[[:space:]]*identity([[:space:]]|$)'
   '^[[:space:]]*-w[[:space:]]+/etc/passwd([[:space:]]+.*)?-p[[:space:]]*[rwxad]*w[rwxad]*a[rwxad]*([[:space:]]+.*)?-k[[:space:]]*identity([[:space:]]|$)'
   '^[[:space:]]*-w[[:space:]]+/etc/gshadow([[:space:]]+.*)?-p[[:space:]]*[rwxad]*w[rwxad]*a[rwxad]*([[:space:]]+.*)?-k[[:space:]]*identity([[:space:]]|$)'
-  '^[[:space:]]*-w[[:space:]]+/etc/shadow([[:space:]]]+.*)?-p[[:space:]]*[rwxad]*w[rwxad]*a[rwxad]*([[:space:]]+.*)?-k[[:space:]]*identity([[:space:]]|$)'
+  '^[[:space:]]*-w[[:space:]]+/etc/shadow([[:space:]]+.*)?-p[[:space:]]*[rwxad]*w[rwxad]*a[rwxad]*([[:space:]]+.*)?-k[[:space:]]*identity([[:space:]]|$)'
   '^[[:space:]]*-w[[:space:]]+/etc/security/opasswd([[:space:]]+.*)?-p[[:space:]]*[rwxad]*w[rwxad]*a[rwxad]*([[:space:]]+.*)?-k[[:space:]]*identity([[:space:]]|$)'
 )
 
