@@ -1,11 +1,3 @@
-#
-//  TWGCB-01-008-0002.sh
-//  
-//
-//  Created by zhuo on 2025/9/3.
-//
-
-
 #!/bin/bash
 # TWGCB-01-008-0002 v2: Disable squashfs filesystem (RHEL 8.5)
 # Ensures:
@@ -41,7 +33,6 @@ list_squashfs_mounts() {
 print_matches_with_prefix() { [[ -f "$1" ]] && grep -nF -- "$2" "$1" | sed 's/^/Line: /'; }
 
 snapd_installed() {
-  # Detect via rpm or executable presence
   rpm -q snapd >/dev/null 2>&1 && return 0
   command -v snap >/dev/null 2>&1 && return 0
   return 1
@@ -77,7 +68,6 @@ list_snapd_details() {
   done
   echo
   echo "Potential Snap (squashfs) mounts:"
-  # Many snaps appear as loop-mounted squashfs images under /var/lib/snapd/snaps
   awk '($3=="squashfs"){printf "%s %s %s %s\n",$2,$1,$3,$4}' /proc/self/mounts \
     | grep -E "/var/lib/snapd/snaps/|\.snap" | nl -ba | sed 's/^/Line: /' || true
 }
@@ -183,7 +173,6 @@ warn_snapd_if_needed() {
   local warn=1
   snapd_installed && warn=0
   snapd_services_active && warn=0
-  # Snap mounts (squashfs images usually under /var/lib/snapd/snaps/*.snap)
   if awk '($3=="squashfs"){print $2,$1}' /proc/self/mounts | grep -Eq "/var/lib/snapd/snaps/|\.snap"; then
     warn=0
   fi
@@ -212,11 +201,9 @@ apply_fix() {
   echo -e "${CYAN}Applying fix...${RESET}"
   ensure_conf
 
-  # If mounts exist, offer to clean fstab then unmount
   if any_squashfs_mounts; then
     echo
-    echo "Current squashfs mounts:"
-    list_squashfs_mounts
+    echo "Current squashfs mounts:"; list_squashfs_mounts
     echo
     echo -n "Comment squashfs lines in /etc/fstab and unmount now? [Y]es / [N]o / [C]ancel: "
     local ans
@@ -231,7 +218,6 @@ apply_fix() {
     done
   fi
 
-  # Try to remove module if still loaded
   if is_module_loaded; then
     rmmod squashfs 2>/dev/null || echo -e "${YELLOW}Could not unload squashfs module (it may be in use). Continuing.${RESET}"
   fi
@@ -243,7 +229,6 @@ apply_fix() {
 prompt_apply() {
   echo
   echo -e "${RED}Non-compliant:${RESET} squashfs is enabled and/or not fully blacklisted (or mounts exist)."
-  # Pre-apply Snap warning, if applicable
   warn_snapd_if_needed
   case $? in
     2) return 2 ;;  # user chose No
