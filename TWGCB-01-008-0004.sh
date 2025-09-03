@@ -1,23 +1,16 @@
 #!/bin/bash
-# TWGCB-01-008-0004: Configure /tmp as tmpfs with secure options (RHEL 8.5)
-# Compliance target:
-#   /tmp mounted as tmpfs with: noexec,nodev,nosuid,mode=1777 (atime policy flexible: relatime/strictatime)
-# Methods supported:
-#   - fstab method (add tmpfs line for /tmp, mount or remount)
-#   - systemd tmp.mount method (create/enable unit with correct options)
-# Output style:
-#   - Shows matches with "Line: <num>:" prefixes
-#   - Y/N/C prompts using single keypress
+# TWGCB-01-008-0004 v3 (interactive-only): Configure /tmp as tmpfs with secure options (RHEL 8.5)
+# Target: /tmp on tmpfs with noexec,nodev,nosuid,mode=1777 (relatime/strictatime acceptable)
+# Methods: fstab or systemd tmp.mount
 # Notes:
-#   - Mounting tmpfs on /tmp will hide any existing contents until unmounted.
-#   - This script backs up files it edits.
+#   - No CLI flags; purely interactive with single-key prompts read from /dev/tty.
+#   - Shows findings with "Line: <num>:" prefixes.
 set -uo pipefail
 
 TITLE="TWGCB-01-008-0004: Configure /tmp as tmpfs"
 FSTAB="/etc/fstab"
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
-SYSTEMD_WANTS_DIR="/etc/systemd/system/local-fs.target.wants"
-UNIT_PATH="${SYSTEMD_UNIT_DIR}/tmp.mount"     # we'll manage this unit path
+UNIT_PATH="${SYSTEMD_UNIT_DIR}/tmp.mount"
 REQUIRED_FSTYPE="tmpfs"
 REQUIRED_OPTS_COMMON="noexec,nodev,nosuid"
 REQUIRED_MODE="mode=1777"
@@ -27,28 +20,37 @@ GREEN="\e[92m"; RED="\e[91m"; YELLOW="\e[93m"; CYAN="\e[96m"; BOLD="\e[1m"; RESE
 
 require_root() { [[ $EUID -ne 0 ]] && { echo -e "${RED}Must run as root.${RESET}"; exit 1; }; }
 
-# Detect current mount of /tmp from /proc/self/mounts
-current_tmp_mount() {
-  awk '$2=="/tmp"{print NR ":" $0}' /proc/self/mounts
+# Read one key from /dev/tty (fallback to stdin if TTY); loop until a valid key is provided
+read_key_choice() {
+  local prompt="$1" valid="$2" key=""
+  while true; do
+    if [[ -t 0 ]]; then
+      echo -n "$prompt"
+      IFS= read -rsn1 key || key=""
+      echo
+    else
+      echo -n "$prompt" > /dev/tty 2>/dev/null || true
+      IFS= read -rsn1 key < /dev/tty 2>/dev/null || key=""
+      echo > /dev/tty 2>/dev/null || true
+    fi
+    [[ "$key" =~ $valid ]] && { printf "%s" "$key"; return 0; }
+    echo "Please press one of: ${valid}" 1>&2
+  done
 }
-current_tmp_fstype() {
-  awk '$2=="/tmp"{print $3; exit}' /proc/self/mounts
-}
-current_tmp_opts() {
-  awk '$2=="/tmp"{print $4; exit}' /proc/self/mounts
-}
+
+# Runtime mount info
+current_tmp_mount() { awk '$2=="/tmp"{print NR ":" $0}' /proc/self/mounts; }
+current_tmp_fstype() { awk '$2=="/tmp"{print $3; exit}' /proc/self/mounts; }
+current_tmp_opts() { awk '$2=="/tmp"{print $4; exit}' /proc/self/mounts; }
 
 has_required_opts_runtime() {
   local opts="$1"
-  # require noexec,nodev,nosuid all present
   for k in noexec nodev nosuid; do
     grep -qE "(^|,)$k(,|$)" <<<"$opts" || return 1
   done
-  # mode=1777 is preferred; accept either mount option or live dir perms 1777
-  if grep -qE "(^|,)mode=1777(,|$)" <<<"$opts"; then
+  if grep -qE "(^|,)${REQUIRED_MODE}(,|$)" <<<"$opts"; then
     return 0
   else
-    # fallback to directory perms check
     local perm; perm="$(stat -c %a /tmp 2>/dev/null || echo "")"
     [[ "$perm" == "1777" ]] || return 1
   fi
@@ -56,26 +58,23 @@ has_required_opts_runtime() {
 }
 
 # fstab helpers
-fstab_line_for_tmp() {
-  awk '($0!~/^\s*#/ && NF>=2 && $2=="/tmp"){print NR ":" $0}' "$FSTAB" 2>/dev/null
-}
+fstab_line_for_tmp() { [[ -f "$FSTAB" ]] && awk '($0!~/^\s*#/ && NF>=2 && $2=="/tmp"){print NR ":" $0}' "$FSTAB"; }
 fstab_has_compliant_tmp_line() {
-  awk -v needfs="$REQUIRED_FSTYPE" -v need1="noexec" -v need2="nodev" -v need3="nosuid" -v needm="mode=1777" '
+  [[ -f "$FSTAB" ]] || return 1
+  awk -v needfs="$REQUIRED_FSTYPE" -v needm="$REQUIRED_MODE" '
+    function hasopt(o,pat){return o ~ "(^|,)" pat "(,|$)"}
     ($0!~/^\s*#/ && NF>=4 && $2=="/tmp") {
       fs=$3; opts=$4;
-      if (fs==needfs && opts ~ /(^|,)noexec(,|$)/ && opts ~ /(^|,)nodev(,|$)/ && opts ~ /(^|,)nosuid(,|$)/ && opts ~ /(^|,)mode=1777(,|$)/) { exit 0 }
+      if (fs==needfs && hasopt(opts,"noexec") && hasopt(opts,"nodev") && hasopt(opts,"nosuid") && hasopt(opts,"mode=1777")) exit 0
     }
-    END{ exit 1 }' "$FSTAB" 2>/dev/null
+    END{exit 1}' "$FSTAB"
 }
 
 # systemd unit helpers
-unit_options_line() {
-  # returns Options=... line from tmp.mount if present
-  awk '/^\[Mount\]/{inm=1; next} /^\[/{inm=0} inm && /^Options=/{print NR ":" $0}' "$UNIT_PATH" 2>/dev/null
-}
+unit_options_line() { [[ -f "$UNIT_PATH" ]] && awk '/^\[Mount\]/{inm=1; next} /^\[/{inm=0} inm && /^Options=/{print NR ":" $0}' "$UNIT_PATH"; }
 unit_is_compliant() {
   [[ -f "$UNIT_PATH" ]] || return 1
-  awk -v need1="noexec" -v need2="nodev" -v need3="nosuid" -v needm="mode=1777" '
+  awk '
     /^\[Mount\]/{inm=1; next} /^\[/{inm=0}
     inm && /^Type=/{type=$0}
     inm && /^What=/{what=$0}
@@ -122,46 +121,24 @@ is_compliant() {
   opts="$(current_tmp_opts || true)"
   [[ "$fstype" == "$REQUIRED_FSTYPE" ]] || return 1
   has_required_opts_runtime "$opts" || return 1
-  # Also require that either fstab or unit config encodes the target options (persist across reboot)
-  if fstab_has_compliant_tmp_line || unit_is_compliant; then
-    return 0
-  fi
+  if fstab_has_compliant_tmp_line || unit_is_compliant; then return 0; fi
   return 1
 }
 
-prompt_choice_method() {
-  # Decide how to apply: F) fstab, S) systemd tmp.mount, C) cancel
-  echo
-  echo -n "Choose method to enforce /tmp=tmpfs (secure): [F]stab / [S]ystemd tmp.mount / [C]ancel: "
-  local ans
-  while true; do
-    IFS= read -rsn1 ans; echo
-    case "$ans" in
-      [Ff]) echo "fstab"; return 0 ;;
-      [Ss]) echo "systemd"; return 0 ;;
-      [Cc]) echo "cancel"; return 0 ;;
-      *) echo -n "Press F/S/C: " ;;
-    esac
-  done
-}
+backup_file() { local p="$1"; [[ -f "$p" ]] && cp -a -- "$p" "${p}.bak.$(date +%Y%m%d-%H%M%S)"; }
 
-backup_file() {
-  local p="$1"
-  [[ -f "$p" ]] || return 0
-  cp -a -- "$p" "${p}.bak.$(date +%Y%m%d-%H%M%S)"
-}
+ensure_tmp_dir() { install -d -m 1777 /tmp; chown root:root /tmp; }
 
 apply_via_fstab() {
   echo -e "${CYAN}Applying via /etc/fstab...${RESET}"
+  ensure_tmp_dir
   install -d -m 0755 /etc
   touch "$FSTAB"
   backup_file "$FSTAB"
 
-  # Build compliant line
   local opts_add="rw,relatime,${REQUIRED_OPTS_COMMON},${REQUIRED_MODE}"
   local line="tmpfs /tmp tmpfs ${opts_add} 0 0"
 
-  # Remove existing active /tmp lines (uncommented) by commenting them
   awk '{
     if ($0 ~ /^\s*#/){print; next}
     n=split($0,a,/[\t ]+/)
@@ -170,17 +147,14 @@ apply_via_fstab() {
   }' "$FSTAB" > "${FSTAB}.tmp.$$" && install -m 0644 "${FSTAB}.tmp.$$" "$FSTAB"
   rm -f "${FSTAB}.tmp.$$"
 
-  # Append our compliant line
   echo "$line" >> "$FSTAB"
   echo "Added fstab entry:"
   echo "Line: 1:$line"
 
-  # Apply runtime:
   local fstype; fstype="$(current_tmp_fstype || true)"
   if [[ "$fstype" == "tmpfs" ]]; then
     mount -o "remount,${opts_add}" /tmp 2>/dev/null || true
   else
-    # warn about hiding contents
     echo -e "${YELLOW}Note:${RESET} Mounting tmpfs on /tmp will hide existing contents until unmounted."
     mount -t tmpfs -o "${opts_add}" tmpfs /tmp 2>/dev/null || {
       echo -e "${RED}Failed to mount tmpfs on /tmp at runtime.${RESET}"
@@ -192,10 +166,10 @@ apply_via_fstab() {
 
 apply_via_systemd() {
   echo -e "${CYAN}Applying via systemd tmp.mount...${RESET}"
+  ensure_tmp_dir
   install -d -m 0755 "$SYSTEMD_UNIT_DIR"
   backup_file "$UNIT_PATH"
-
-  cat >"$UNIT_PATH" <<'EOF'
+cat >"$UNIT_PATH" <<'EOF'
 [Unit]
 Description=Temporary Directory (/tmp) as tmpfs
 Documentation=man:hier(7) man:tmpfs(5)
@@ -212,7 +186,6 @@ Options=mode=1777,strictatime,noexec,nodev,nosuid
 [Install]
 WantedBy=local-fs.target
 EOF
-
   chmod 0644 "$UNIT_PATH"
   systemctl daemon-reload
   systemctl unmask tmp.mount >/dev/null 2>&1 || true
@@ -226,12 +199,22 @@ EOF
 prompt_apply() {
   echo
   echo -e "${RED}Non-compliant:${RESET} /tmp is not tmpfs with required options and/or persistent config missing."
-  local method; method="$(prompt_choice_method)"
-  case "$method" in
-    fstab) apply_via_fstab && return 0 || return 1 ;;
-    systemd) apply_via_systemd && return 0 || return 1 ;;
-    cancel) echo "Canceled by user."; return 3 ;;
+  local method key
+  key="$(read_key_choice "Choose method: [F]stab / [S]ystemd tmp.mount / [C]ancel: " "^[FfSsCc]$")"
+  case "$key" in
+    [Ff]) method="fstab" ;;
+    [Ss]) method="systemd" ;;
+    [Cc]) echo "Canceled by user."; return 3 ;;
   esac
+  local confirm
+  confirm="$(read_key_choice "Proceed applying via ${method}? [Y]es / [N]o: " "^[YyNn]$")"
+  [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted by user."; return 3; }
+
+  if [[ "$method" == "fstab" ]]; then
+    apply_via_fstab
+  else
+    apply_via_systemd
+  fi
 }
 
 main() {
@@ -244,10 +227,7 @@ main() {
     exit 0
   fi
 
-  prompt_apply
-  rc=$?
-  [[ $rc -eq 3 ]] && exit 3
-  [[ $rc -ne 0 ]] && { echo -e "${RED}Failed to apply.${RESET}"; exit 1; }
+  prompt_apply || { rc=$?; [[ $rc -eq 3 ]] && exit 3 || exit 1; }
 
   echo; echo "Re-checking..."; show_state; echo
   if is_compliant; then
