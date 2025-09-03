@@ -1,10 +1,7 @@
 #!/bin/bash
-# TWGCB-01-008-0005: Ensure /tmp is mounted with nodev (RHEL 8.5)
-# This script checks and enforces the 'nodev' mount option on /tmp.
-# It supports two persistence methods:
-#   - /etc/fstab (edits the /tmp line to add nodev)
-#   - systemd tmp.mount (adds nodev to Options= if present; can create unit if missing)
-# Prompts are visible (type a letter and press Enter). No CLI flags.
+# TWGCB-01-008-0005 v5: Ensure /tmp has nodev (RHEL 8.5)
+# - Uses single-keypress prompts with: read -rsn1
+# - Prints clear reasons if non-compliant
 set -uo pipefail
 
 TITLE="TWGCB-01-008-0005: Ensure /tmp has nodev"
@@ -12,28 +9,30 @@ FSTAB="/etc/fstab"
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
 UNIT_PATH="${SYSTEMD_UNIT_DIR}/tmp.mount"
 
-# Colors
 GREEN="\e[92m"; RED="\e[91m"; YELLOW="\e[93m"; CYAN="\e[96m"; BOLD="\e[1m"; RESET="\e[0m"
 
 require_root() { [[ $EUID -ne 0 ]] && { echo -e "${RED}Must run as root.${RESET}"; exit 1; }; }
 
-# Read a line with prompt (from TTY if needed)
-read_line_from_tty() {
-  local __varname="$1"; shift
-  local __prompt="$*"
+# -------- I/O helpers (single-key) --------
+read_one_key() {
+  # usage: read_one_key "Prompt text: " -> echoes key pressed
+  local prompt="$1" key=""
   if [[ -t 0 ]]; then
-    read -r -p "$__prompt" "$__varname"
+    echo -en "$prompt"
+    IFS= read -rsn1 key || key=""
+    echo
   elif [[ -r /dev/tty ]]; then
-    printf "%s" "$__prompt" > /dev/tty
-    # shellcheck disable=SC2229
-    read -r "$__varname" < /dev/tty
-    printf "\n" > /dev/tty 2>/dev/null || true
+    echo -en "$prompt" > /dev/tty
+    IFS= read -rsn1 key < /dev/tty 2>/dev/null || key=""
+    echo > /dev/tty 2>/dev/null || true
   else
-    printf -v "$__varname" "F"
+    # No TTY; default to 'F' (fstab)
+    key="F"
   fi
+  printf "%s" "$key"
 }
 
-# ---------- Runtime state ----------
+# -------- Runtime state --------
 current_tmp_mount_line() { awk '$2=="/tmp"{print NR ":" $0}' /proc/self/mounts; }
 current_tmp_opts() { awk '$2=="/tmp"{print $4; exit}' /proc/self/mounts; }
 tmp_is_mountpoint() { awk '$2=="/tmp"{found=1; exit} END{exit !found}' /proc/self/mounts; }
@@ -42,7 +41,7 @@ runtime_has_nodev() {
   [[ -n "$opts" ]] && grep -qE "(^|,)nodev(,|$)" <<<"$opts"
 }
 
-# ---------- fstab helpers ----------
+# -------- fstab helpers --------
 fstab_lines_for_tmp() { [[ -f "$FSTAB" ]] && awk '($0!~/^\s*#/ && NF>=2 && $2=="/tmp"){print NR ":" $0}' "$FSTAB"; }
 fstab_has_nodev() {
   [[ -f "$FSTAB" ]] || return 1
@@ -69,7 +68,7 @@ fstab_add_nodev() {
   rm -f "${FSTAB}.tmp.$$"
 }
 
-# ---------- systemd tmp.mount helpers ----------
+# -------- systemd tmp.mount helpers --------
 unit_options_line() { [[ -f "$UNIT_PATH" ]] && awk '/^\[Mount\]/{inm=1; next} /^\[/{inm=0} inm && /^Options=/{print NR ":" $0}' "$UNIT_PATH"; }
 unit_has_nodev() {
   [[ -f "$UNIT_PATH" ]] || return 1
@@ -95,7 +94,6 @@ unit_add_nodev() {
     ' "$UNIT_PATH" > "${UNIT_PATH}.tmp.$$" && install -m 0644 "${UNIT_PATH}.tmp.$$" "$UNIT_PATH"
     rm -f "${UNIT_PATH}.tmp.$$"
   else
-    # Create a minimal unit to mount tmpfs with nodev (safe default)
     cat >"$UNIT_PATH" <<'EOF'
 [Unit]
 Description=Temporary Directory (/tmp) as tmpfs
@@ -119,7 +117,7 @@ EOF
   systemctl enable --now tmp.mount || true
 }
 
-# ---------- show state ----------
+# -------- show state --------
 show_state() {
   echo -e "${BOLD}$TITLE${RESET}"
   echo
@@ -151,16 +149,20 @@ show_state() {
   unit_options_line | sed 's/^/Line: /'
 }
 
-# ---------- compliance ----------
+# -------- compliance --------
 is_compliant() {
-  runtime_has_nodev || return 1
-  if fstab_has_nodev || unit_has_nodev; then
+  runtime_has_nodev
+  local r=$?
+  fstab_has_nodev; local f=$?
+  unit_has_nodev;  local u=$?
+  # compliant if: runtime has nodev AND (fstab has nodev OR unit has nodev)
+  if [[ $r -eq 0 && ( $f -eq 0 || $u -eq 0 ) ]]; then
     return 0
   fi
   return 1
 }
 
-# ---------- apply ----------
+# -------- apply --------
 apply_runtime_remount() {
   if tmp_is_mountpoint; then
     echo "Remounting /tmp with nodev..."
@@ -187,17 +189,20 @@ apply_via_fstab() {
 apply_via_systemd() {
   echo -e "${CYAN}Applying via systemd tmp.mount...${RESET}"
   unit_add_nodev
-  # After enabling tmp.mount, /tmp should be a mountpoint; ensure runtime nodev
   apply_runtime_remount || true
   return 0
 }
 
 prompt_apply() {
   echo
+  if is_compliant; then
+    echo -e "${GREEN}Already compliant.${RESET}"
+    return 0
+  fi
   echo -e "${RED}Non-compliant:${RESET} /tmp is missing nodev at runtime and/or persistently."
-  local ans
-  read_line_from_tty ans "Choose method: [F]stab / [S]ystemd tmp.mount / [C]ancel: "
-  case "${ans^^}" in
+  echo "Press a key: [F]stab / [S]ystemd tmp.mount / [C]ancel"
+  local key; key="$(read_one_key "> " )"
+  case "${key^^}" in
     F) apply_via_fstab ;;
     S) apply_via_systemd ;;
     C) echo "Canceled by user."; return 3 ;;
