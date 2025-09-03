@@ -1,7 +1,8 @@
 #!/bin/bash
-# TWGCB-01-008-0005 v5: Ensure /tmp has nodev (RHEL 8.5)
-# - Uses single-keypress prompts with: read -rsn1
-# - Prints clear reasons if non-compliant
+# TWGCB-01-008-0005 v6: Ensure /tmp has nodev (RHEL 8.5)
+# - Uses single-key prompts: read -rsn1
+# - Fixed compliance logic (no parentheses in [[ ]] boolean)
+# - Falls back to fstab if no key (Enter) is detected
 set -uo pipefail
 
 TITLE="TWGCB-01-008-0005: Ensure /tmp has nodev"
@@ -15,7 +16,7 @@ require_root() { [[ $EUID -ne 0 ]] && { echo -e "${RED}Must run as root.${RESET}
 
 # -------- I/O helpers (single-key) --------
 read_one_key() {
-  # usage: read_one_key "Prompt text: " -> echoes key pressed
+  # usage: read_one_key "Prompt text: " -> echoes key pressed (defaults to 'F' if blank)
   local prompt="$1" key=""
   if [[ -t 0 ]]; then
     echo -en "$prompt"
@@ -26,9 +27,9 @@ read_one_key() {
     IFS= read -rsn1 key < /dev/tty 2>/dev/null || key=""
     echo > /dev/tty 2>/dev/null || true
   else
-    # No TTY; default to 'F' (fstab)
     key="F"
   fi
+  [[ -z "$key" ]] && key="F"
   printf "%s" "$key"
 }
 
@@ -151,13 +152,13 @@ show_state() {
 
 # -------- compliance --------
 is_compliant() {
-  runtime_has_nodev
-  local r=$?
+  runtime_has_nodev; local r=$?
   fstab_has_nodev; local f=$?
   unit_has_nodev;  local u=$?
-  # compliant if: runtime has nodev AND (fstab has nodev OR unit has nodev)
-  if [[ $r -eq 0 && ( $f -eq 0 || $u -eq 0 ) ]]; then
-    return 0
+  if [[ $r -eq 0 ]]; then
+    if [[ $f -eq 0 || $u -eq 0 ]]; then
+      return 0
+    fi
   fi
   return 1
 }
